@@ -151,6 +151,36 @@ int main()
         }
     }
 
+    // экспорт с повтором x2: 3 ноты * 2 такта
+    {
+        setParam (p, "exportreps", 1.0f);
+        auto f = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("t_pattern2.mid");
+        p.writePatternMidi (0, f);
+        juce::MidiFile mf; juce::FileInputStream in (f); mf.readFrom (in);
+        int noteOns = 0; double lastNote = 0;
+        for (int i = 0; i < mf.getTrack (0)->getNumEvents(); ++i)
+        {
+            auto& m = mf.getTrack (0)->getEventPointer (i)->message;
+            if (m.isNoteOn()) { ++noteOns; lastNote = juce::jmax (lastNote, m.getTimeStamp()); }
+        }
+        std::printf ("test11 export x2 (expect 6 note-ons, last tick 3840+360=4200 for step 17): %d, last %.0f\n", noteOns, lastNote);
+        setParam (p, "exportreps", 0.0f);
+    }
+
+    // круговой импорт: экспорт паттерна A и импорт в паттерн B, маски должны совпасть
+    for (float swing : { 75.0f, 50.0f, 62.0f })
+    {
+        setParam (p, "swing", swing);
+        auto f = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("t_roundtrip.mid");
+        p.writePatternMidi (0, f);
+        p.clearPattern (1);
+        const int n = p.importPatternMidi (1, f);
+        bool same = true;
+        for (int pad = 0; pad < DrumRackProcessor::numPads; ++pad)
+            if (p.stepMask[0][pad].load() != p.stepMask[1][pad].load()) same = false;
+        std::printf ("test12 import roundtrip swing %.0f (expect 3 notes, same=1): %d notes, same=%d\n", swing, n, (int) same);
+    }
+
     // осциллограф получил данные
     {
         float mx = 0.0f;

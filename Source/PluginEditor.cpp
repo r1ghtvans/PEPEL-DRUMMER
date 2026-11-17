@@ -153,7 +153,8 @@ private:
 
 //==============================================================================
 // Сетка шагов: 16 строк (пэды) x 16 шагов
-class DrumRackEditor::StepGrid : public juce::Component
+class DrumRackEditor::StepGrid : public juce::Component,
+                                 public juce::FileDragAndDropTarget
 {
 public:
     explicit StepGrid (DrumRackEditor& o) : owner (o), proc (o.proc) {}
@@ -167,7 +168,7 @@ public:
         const int rh = rowHeight();
         const int cw = cellWidth();
 
-        g.setFont (pixelfont::vhs (20.0f));
+        g.setFont (pixelfont::vhs (18.0f));
         g.setColour (pal::textDim);
         for (int beat = 0; beat < 4; ++beat)
             g.drawText (juce::String (beat + 1), cellX (beat * 4) + 2, 0, 30, rulerH, juce::Justification::centredLeft, false);
@@ -192,7 +193,7 @@ public:
             g.drawText (juce::String (row + 1).paddedLeft ('0', 2), 13, y, 20, rh, juce::Justification::centredLeft, false);
 
             g.setColour (name.isEmpty() ? pal::textDim.withAlpha (0.6f) : pal::textDim.brighter (0.3f));
-            g.setFont (pixelfont::vhs (19.0f));
+            g.setFont (pixelfont::vhs (17.0f));
             g.drawText (name.isEmpty() ? "-" : name, 38, y, labelW - 48, rh, juce::Justification::centredLeft, true);
 
             for (int col = 0; col < 16; ++col)
@@ -267,6 +268,25 @@ public:
 
     void mouseUp (const juce::MouseEvent&) override { dragging = false; }
 
+    // MIDI-файл можно бросить прямо на сетку: ноты превратятся в шаги
+    bool isInterestedInFileDrag (const juce::StringArray& files) override
+    {
+        for (auto& f : files)
+            if (juce::File (f).hasFileExtension ("mid;midi"))
+                return true;
+        return false;
+    }
+
+    void filesDropped (const juce::StringArray& files, int, int) override
+    {
+        for (auto& f : files)
+            if (juce::File (f).hasFileExtension ("mid;midi"))
+            {
+                owner.importMidi (juce::File (f));
+                break;
+            }
+    }
+
 private:
     static constexpr int labelW = 112;
     static constexpr int rulerH = 16;
@@ -330,7 +350,10 @@ public:
         auto file = dir.getChildFile ("PEPEL DRUMMER pattern " + juce::String::charToString ((juce::juce_wchar) ('A' + pattern)) + ".mid");
 
         if (owner.proc.writePatternMidi (pattern, file))
+        {
+            owner.setStatus ("pattern " + juce::String::charToString ((juce::juce_wchar) ('A' + pattern)) + " > drop into FL");
             juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, this);
+        }
     }
 
 private:
@@ -346,7 +369,8 @@ DrumRackEditor::DrumRackEditor (DrumRackProcessor& p)
       driveRow ("Drive", fmtGain), ceilRow ("Ceiling", fmtDb),
       patternChoice ("Pattern", DrumRackProcessor::patternChoices(), pal::lampSoft),
       gridChoice ("Grid", DrumRackProcessor::gridChoices(), pal::lampSoft),
-      swingRow ("Swing", fmtSwing), lenRow ("Length", fmtLen)
+      swingRow ("Swing", fmtSwing), lenRow ("Length", fmtLen),
+      repeatChoice ("Repeat", DrumRackProcessor::repeatChoices(), pal::lampSoft)
 {
     setLookAndFeel (&laf);
     setOpaque (true);
@@ -397,6 +421,7 @@ DrumRackEditor::DrumRackEditor (DrumRackProcessor& p)
     gridChoice.attach (proc.apvts, "grid");
     swingRow.attach (proc.apvts, "swing");
     lenRow.attach (proc.apvts, "seqlen");
+    repeatChoice.attach (proc.apvts, "exportreps");
 
     if (auto* seqParam = proc.apvts.getParameter ("seqon"))
     {
@@ -417,10 +442,11 @@ DrumRackEditor::DrumRackEditor (DrumRackProcessor& p)
     };
 
     saveMidiBtn.onClick = [this] { saveMidiFile(); };
+    importBtn.onClick = [this] { browseForMidi(); };
 
     for (juce::Component* c : std::initializer_list<juce::Component*> {
-             &patternChoice, &gridChoice, &swingRow, &lenRow, &seqOnBtn, &clearPatBtn,
-             &saveMidiBtn, dragBtn.get(), grid.get() })
+             &patternChoice, &gridChoice, &swingRow, &lenRow, &repeatChoice, &seqOnBtn, &clearPatBtn,
+             &importBtn, &saveMidiBtn, dragBtn.get(), grid.get() })
     {
         addAndMakeVisible (c);
         seqPage.push_back (c);
@@ -524,7 +550,43 @@ void DrumRackEditor::saveMidiFile()
                           {
                               auto file = fc.getResult();
                               if (safeThis != nullptr && file != juce::File())
-                                  safeThis->proc.writePatternMidi (pattern, file.withFileExtension ("mid"));
+                                  if (safeThis->proc.writePatternMidi (pattern, file.withFileExtension ("mid")))
+                                      safeThis->setStatus ("saved " + file.withFileExtension ("mid").getFileName());
+                          });
+}
+
+void DrumRackEditor::setStatus (const juce::String& text)
+{
+    statusText = text;
+    statusFrames = 60;    // около 4 секунд
+    repaint();
+}
+
+void DrumRackEditor::importMidi (const juce::File& file)
+{
+    const int pattern = juce::jlimit (0, DrumRackProcessor::numPatterns - 1,
+                                      (int) std::lround (proc.apvts.getRawParameterValue ("pattern")->load()));
+    const int n = proc.importPatternMidi (pattern, file);
+
+    if (n > 0)       setStatus ("imported " + juce::String (n) + " notes");
+    else if (n == 0) setStatus ("no notes on pad keys 36-51");
+    else             setStatus ("cannot read midi file");
+
+    grid->repaint();
+}
+
+void DrumRackEditor::browseForMidi()
+{
+    chooser = std::make_unique<juce::FileChooser> ("Import MIDI into the pattern", juce::File(), "*.mid;*.midi");
+
+    juce::Component::SafePointer<DrumRackEditor> safeThis (this);
+
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [safeThis] (const juce::FileChooser& fc)
+                          {
+                              auto file = fc.getResult();
+                              if (safeThis != nullptr && file.existsAsFile())
+                                  safeThis->importMidi (file);
                           });
 }
 
@@ -539,6 +601,9 @@ void DrumRackEditor::timerCallback()
 void DrumRackEditor::advanceFrame()
 {
     ++frame;
+
+    if (statusFrames > 0)
+        --statusFrames;
 
     static const float speeds[3] = { 0.35f, 0.6f, 0.25f };
     for (int i = 0; i < 3; ++i)
@@ -799,21 +864,25 @@ void DrumRackEditor::resized()
     monoBtn.setBounds  (clipPanel.getX() + 12, clipPanel.getY() + 106, 120, 33);
 
     // --- SEQUENCER ---
-    seqCtrlPanel = { left, top, 760, 148 };
-    seqGridPanel = { left, top + 158, 760, 342 };
+    seqCtrlPanel = { left, top, 760, 180 };
+    seqGridPanel = { left, top + 190, 760, 310 };
 
-    const int lx = left + 12, rx = left + 12 + 352 + 16;
+    const int lx = left + 12, rx = left + 12 + 352 + 16, by2 = top + 138;
     patternChoice.setBounds (lx, top + 44, 352, 30);
     gridChoice.setBounds    (lx, top + 74, 352, 30);
-    seqOnBtn.setBounds      (lx, top + 106, 120, 33);
-    clearPatBtn.setBounds   (lx + 128, top + 106, 120, 33);
+    hintRect = { lx, top + 104, 352, 30 };
 
-    swingRow.setBounds    (rx, top + 44, 344, 30);
-    lenRow.setBounds      (rx, top + 74, 344, 30);
-    dragBtn->setBounds    (rx, top + 106, 164, 33);
-    saveMidiBtn.setBounds (rx + 172, top + 106, 164, 33);
+    swingRow.setBounds     (rx, top + 44, 344, 30);
+    lenRow.setBounds       (rx, top + 74, 344, 30);
+    repeatChoice.setBounds (rx, top + 104, 344, 30);
 
-    grid->setBounds (seqGridPanel.getX() + 12, seqGridPanel.getY() + 42, 736, 292);
+    seqOnBtn.setBounds    (lx, by2, 96, 33);
+    clearPatBtn.setBounds (lx + 104, by2, 96, 33);
+    importBtn.setBounds   (lx + 208, by2, 144, 33);
+    dragBtn->setBounds    (rx, by2, 168, 33);
+    saveMidiBtn.setBounds (rx + 176, by2, 168, 33);
+
+    grid->setBounds (seqGridPanel.getX() + 12, seqGridPanel.getY() + 42, 736, 260);
 
     scopeRect = { 20, 626, 760, 46 };
 
@@ -1064,6 +1133,11 @@ void DrumRackEditor::paint (juce::Graphics& g)
     {
         paintPanel (g, seqCtrlPanel, "SEQUENCER", pal::red);
         paintPanel (g, seqGridPanel, "STEPS", pal::lampSoft);
+
+        g.setFont (pixelfont::vhs (20.0f));
+        g.setColour (statusFrames > 0 ? pal::lamp : pal::textDim);
+        g.drawText (statusFrames > 0 ? statusText : juce::String ("drag .mid to FL, then turn SEQ off"),
+                    hintRect, juce::Justification::centredLeft, true);
     }
 
     paintScope (g);

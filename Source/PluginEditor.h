@@ -32,6 +32,9 @@ private:
     void selectPad (int index);
     void browseForSample();
     void saveMidiFile();
+    void browseForMidi();
+    void importMidi (const juce::File& file);
+    void setStatus (const juce::String& text);
     void showPage (int newPage);
     void rebuildBackground();
     void rebuildOverlays();
@@ -70,6 +73,10 @@ private:
     // страница SEQUENCER
     ChoiceRow patternChoice, gridChoice;
     ParamRow swingRow, lenRow;
+    ChoiceRow repeatChoice;
+    PixelButton importBtn { "IMPORT .MID", pal::steel };
+    juce::String statusText;
+    int statusFrames = 0;
     PixelButton seqOnBtn { "SEQ ON", pal::lampSoft, true };
     PixelButton clearPatBtn { "CLEAR", pal::red };
     PixelButton saveMidiBtn { "SAVE .MID", pal::steel };
@@ -81,7 +88,7 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
 
     // области
-    juce::Rectangle<int> padsPanel, samplePanel, clipPanel, wavePanel, seqCtrlPanel, seqGridPanel, scopeRect;
+    juce::Rectangle<int> padsPanel, samplePanel, clipPanel, wavePanel, seqCtrlPanel, seqGridPanel, scopeRect, hintRect;
 
     // кэш картинок
     juce::Image background, scanlines, vignette;

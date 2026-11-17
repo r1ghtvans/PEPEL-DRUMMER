@@ -56,8 +56,12 @@ public:
     // Паттерн секвенсора в MIDI-файл (его можно перетащить в Piano roll или плейлист FL)
     bool writePatternMidi (int pattern, const juce::File& target) const;
 
+    // Обратно: MIDI-файл (например экспорт из пианоролла FL) в сетку шагов. Возвращает число нот, -1 при ошибке
+    int importPatternMidi (int pattern, const juce::File& source);
+
     static juce::StringArray patternChoices() { return { "A", "B", "C", "D" }; }
     static juce::StringArray gridChoices()    { return { "1/8", "1/16", "1/32" }; }
+    static juce::StringArray repeatChoices()  { return { "x1", "x2", "x4", "x8" }; }
 
     // --- секвенсор: 16 шагов, по биту на шаг ---
     bool getStep (int pattern, int pad, int step) const;
@@ -131,6 +135,7 @@ private:
     std::atomic<float>* patternP = nullptr;
     std::atomic<float>* seqLenP  = nullptr;
     std::atomic<float>* gridP    = nullptr;
+    std::atomic<float>* repsP    = nullptr;
 
     float smoothDrive[numPads] {};   // сглаженные значения клиппера (без щелчков)
     float smoothCeil[numPads]  {};

@@ -80,6 +80,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumRackProcessor::createLay
     layout.add (std::make_unique<AudioParameterChoice> (
         ParameterID { "grid", 1 }, "Step Grid", gridChoices(), 1));
 
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { "exportreps", 1 }, "Export Repeat", repeatChoices(), 0));
+
     return layout;
 }
 
@@ -125,6 +128,7 @@ DrumRackProcessor::DrumRackProcessor()
     patternP = apvts.getRawParameterValue ("pattern");
     seqLenP  = apvts.getRawParameterValue ("seqlen");
     gridP    = apvts.getRawParameterValue ("grid");
+    repsP    = apvts.getRawParameterValue ("exportreps");
 }
 
 void DrumRackProcessor::prepareToPlay (double sampleRate, int)
@@ -332,6 +336,7 @@ void DrumRackProcessor::clearPattern (int pattern)
 }
 
 // Паттерн в MIDI: те же ноты, свинг и длина, что играет встроенный секвенсор.
+// Параметр Export Repeat повторяет паттерн на несколько тактов (длина клипа в плейлисте FL).
 // Файл перетаскивается в Piano roll или плейлист FL.
 bool DrumRackProcessor::writePatternMidi (int pattern, const juce::File& target) const
 {
@@ -340,8 +345,10 @@ bool DrumRackProcessor::writePatternMidi (int pattern, const juce::File& target)
 
     const int ppqn = 960;
     static const double lengths[3] = { 0.5, 0.25, 0.125 };
+    static const int repeats[4] = { 1, 2, 4, 8 };
     const double stepTicks = lengths[juce::jlimit (0, 2, (int) std::lround (gridP->load()))] * ppqn;
     const int len = juce::jlimit (1, 16, (int) std::lround (seqLenP->load()));
+    const int reps = repeats[juce::jlimit (0, 3, (int) std::lround (repsP->load()))];
     const double swing = juce::jlimit (0.5, 0.75, (double) swingP->load() / 100.0);
     const double shift = (swing - 0.5) * 2.0;
     const double noteLength = juce::jmax (1.0, std::floor (stepTicks * 0.45));
@@ -349,22 +356,26 @@ bool DrumRackProcessor::writePatternMidi (int pattern, const juce::File& target)
     juce::MidiMessageSequence seq;
     seq.addEvent (juce::MidiMessage::timeSignatureMetaEvent (4, 4), 0.0);
 
-    for (int s = 0; s < len; ++s)
+    for (int r = 0; r < reps; ++r)
     {
-        const double tOn = std::round ((double) s * stepTicks + ((s & 1) != 0 ? shift * stepTicks : 0.0));
-
-        for (int p = 0; p < numPads; ++p)
+        for (int s = 0; s < len; ++s)
         {
-            if (! getStep (pattern, p, s))
-                continue;
+            const int g = r * len + s;   // сквозной номер шага, как в секвенсоре (чётность задаёт свинг)
+            const double tOn = std::round ((double) g * stepTicks + ((g & 1) != 0 ? shift * stepTicks : 0.0));
 
-            const int note = padNote[p].load();
-            seq.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 108), tOn);
-            seq.addEvent (juce::MidiMessage::noteOff (1, note), tOn + noteLength);
+            for (int p = 0; p < numPads; ++p)
+            {
+                if (! getStep (pattern, p, s))
+                    continue;
+
+                const int note = padNote[p].load();
+                seq.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 108), tOn);
+                seq.addEvent (juce::MidiMessage::noteOff (1, note), tOn + noteLength);
+            }
         }
     }
 
-    seq.addEvent (juce::MidiMessage::endOfTrack(), std::round ((double) len * stepTicks));
+    seq.addEvent (juce::MidiMessage::endOfTrack(), std::round ((double) (len * reps) * stepTicks));
     seq.updateMatchedPairs();
 
     juce::MidiFile file;
@@ -375,6 +386,67 @@ bool DrumRackProcessor::writePatternMidi (int pattern, const juce::File& target)
     std::unique_ptr<juce::FileOutputStream> stream (target.createOutputStream());
 
     return stream != nullptr && file.writeTo (*stream);
+}
+
+// Импорт: ноты 36-51 (по назначению пэдов) попадают на ближайший шаг первого окна длиной Pattern Length.
+// Учитывается текущий свинг, чтобы экспорт и импорт совпадали.
+int DrumRackProcessor::importPatternMidi (int pattern, const juce::File& source)
+{
+    if (! juce::isPositiveAndBelow (pattern, numPatterns))
+        return -1;
+
+    juce::FileInputStream in (source);
+    if (! in.openedOk())
+        return -1;
+
+    juce::MidiFile file;
+    if (! file.readFrom (in))
+        return -1;
+
+    const int ticksPerQuarter = file.getTimeFormat();
+    if (ticksPerQuarter <= 0)
+        return -1;                       // SMPTE-время не поддерживается
+
+    const double stepTicks = currentStepLength() * ticksPerQuarter;
+    const int len = juce::jlimit (1, 16, (int) std::lround (seqLenP->load()));
+    const double swing = juce::jlimit (0.5, 0.75, (double) swingP->load() / 100.0);
+    const double shift = (swing - 0.5) * 2.0;
+
+    int masks[numPads] = {};
+    int imported = 0;
+
+    for (int t = 0; t < file.getNumTracks(); ++t)
+    {
+        auto* track = file.getTrack (t);
+
+        for (int i = 0; i < track->getNumEvents(); ++i)
+        {
+            const auto& m = track->getEventPointer (i)->message;
+            if (! m.isNoteOn())
+                continue;
+
+            const double pos = m.getTimeStamp() / stepTicks;      // позиция в шагах
+            const int k0 = (int) std::floor (pos), k1 = k0 + 1;
+            auto effective = [shift] (int k) { return (double) k + ((k & 1) != 0 ? shift : 0.0); };
+            const int k = std::abs (pos - effective (k0)) <= std::abs (pos - effective (k1)) ? k0 : k1;
+
+            if (k < 0 || k >= len)
+                continue;
+
+            for (int p = 0; p < numPads; ++p)
+                if (padNote[p].load() == m.getNoteNumber())
+                {
+                    masks[p] |= 1 << k;
+                    ++imported;
+                }
+        }
+    }
+
+    if (imported > 0)
+        for (int p = 0; p < numPads; ++p)
+            stepMask[pattern][p].store (masks[p]);
+
+    return imported;
 }
 
 // ------------------------------------------------------------------ звук
